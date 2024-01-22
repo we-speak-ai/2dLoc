@@ -46,11 +46,14 @@ pipeline = dai.Pipeline()
 # Define a source - color camera
 cam = pipeline.create(dai.node.ColorCamera)
 cam.setResolution(dai.ColorCameraProperties.SensorResolution.THE_4_K)
+cam.setFps(28.86)   # warning with 30..
 
 # Create Yolo detection network
-# 10k image train, 480x480 nn input
-blob_path = f'{THIS_PATH}/yolov8_custom_train/20240119_train_yolov8n_10kimg_480x/blob_320x192/'
-model_path = f'{blob_path}/best_openvino_2022.1_6shave.blob'
+# 10k image train nn input
+#blob_path = f'{THIS_PATH}/yolov8_custom_train/20240119_train_yolov8n_10kimg_480x/blob_320x192/'
+#blob_path = f'{THIS_PATH}/yolov8_custom_train/20240119_train_yolov8n_10kimg_480x/blob_384x224/'
+blob_path = f'{THIS_PATH}/yolov8_custom_train/20240119_train_yolov8n_10kimg_480x/blob_480x256/'
+model_path = f'{blob_path}/best_openvino_2022.1_5shave.blob'
 config_path = f'{blob_path}/best.json'
 
 # parse config
@@ -203,6 +206,12 @@ xoutNNin = pipeline.create(dai.node.XLinkOut)
 xoutNNin.setStreamName('nnin')
 cam.preview.link(xoutNNin.input)
 
+# still img
+xoutStill = pipeline.create(dai.node.XLinkOut)
+xoutStill.setStreamName("still")
+cam.setStillSize(ORIGINAL_SIZE[0], ORIGINAL_SIZE[1])
+cam.still.link(xoutStill.input)
+
 fpss = {}
 
 def clamp(num, v0, v1):
@@ -250,6 +259,12 @@ with dai.Device(pipeline) as device:
     qNNin = device.getOutputQueue(name='nnin')
     qDet = device.getOutputQueue(name="det")
     qControl = device.getInputQueue('control')
+    qStill = device.getOutputQueue(name="still", maxSize=30, blocking=True)
+    
+    # Make sure the destination path is present before starting to store the examples
+    dirName = "rgb_data"
+    Path(dirName).mkdir(parents=True, exist_ok=True)
+    
     EXP_STEP = 500  # us
     ISO_STEP = 50
     expTime = 6000
@@ -275,6 +290,12 @@ with dai.Device(pipeline) as device:
             detIn = qDet.get()
             sync.add_det(detIn)
 
+        if qStill.has():
+            fname = f"{dirName}/{int(time.time() * 1000)}.jpeg"
+            still_data = qStill.get().getData()
+            cv2.imwrite(fname, still_data.base.getCvFrame())
+            print(f"4k image saved to {fname}")
+        
         # get synchronized msgs
         det_msg, crop_msg = sync.get_msgs()
         if crop_msg is not None:
@@ -287,13 +308,21 @@ with dai.Device(pipeline) as device:
                 detection_center_x, detection_center_y, bbox = get_bbox_on_original_imgs(det_msg.detections)
                 crop_tl_x = detection_center_x - CROP_SIZE[0] // 2
                 crop_tl_y = detection_center_y - CROP_SIZE[1] // 2
-                cv_paint_img[crop_tl_y:crop_tl_y+crop_frame.shape[0], crop_tl_x:crop_tl_x+crop_frame.shape[1]] = crop_frame
-                cv2.imshow('paint', cv_paint_img)
+                crop_br_x = crop_tl_x+crop_frame.shape[1]
+                crop_br_y = crop_tl_y+crop_frame.shape[0]
+                if crop_tl_y > 0 and crop_tl_x > 0 and crop_br_x<ORIGINAL_SIZE[0] and crop_br_y<ORIGINAL_SIZE[1]:
+                    cv_paint_img[crop_tl_y:crop_br_y, crop_tl_x:crop_br_x] = crop_frame
+                    cv2.imshow('paint', cv_paint_img)
 
         # Update screen (1ms pooling rate)
         key = cv2.waitKey(1)
         if key == ord('q'):
             break
+        elif key == ord('c'):
+            ctrl = dai.CameraControl()
+            ctrl.setCaptureStill(True)
+            qControl.send(ctrl)
+            print("Sent 'still' event to the camera!")
         elif key in [ord('i'), ord('o'), ord('k'), ord('l')]:
             if key == ord('i'): expTime -= EXP_STEP
             if key == ord('o'): expTime += EXP_STEP
