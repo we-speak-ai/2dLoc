@@ -1,6 +1,13 @@
 # 2dLoc
 Train and run yolo detection on OAK camera
 
+## Setup
+```
+$ python3.11 -m venv venv
+$ source venv/bin/activate
+$ python -m pip install -r requirements.txt 
+```
+
 ## Train
 see yolo8_custom_train/README.md
 

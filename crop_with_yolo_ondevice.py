@@ -125,23 +125,22 @@ def frameNorm(frame_shape_1, frame_shape_0, bbox):
     normVals[::2] = frame_shape_1
     return (np.clip(np.array(bbox), 0, 1) * normVals).astype(int)
 
-def get_bbox_on_crop(dets):
-    # find detection with most confidence
+def get_best_detection(dets):
+    # find detection with highest confidence
     best_detection = None
     for detection in dets:
         if best_detection is None or detection.confidence > best_detection.confidence:
             best_detection = detection
-    if best_detection is not None:    
-        coords = best_detection
+    return best_detection
+    
+def get_bbox_on_original_imgs(dets):
+    bd = get_best_detection(dets)
+    if bd is not None:    
         # Get detection center
-        x = int((coords.xmin + coords.xmax) / 2 * ORIGINAL_SIZE[0])
-        y = int((coords.ymin + coords.ymax) / 2 * ORIGINAL_SIZE[1])
-        bbox = frameNorm(ORIGINAL_SIZE[0], ORIGINAL_SIZE[1], (coords.xmin, coords.ymin, coords.xmax, coords.ymax))
-        bbox[0] -= (x - CROP_SIZE[0] // 2)
-        bbox[1] -= (y - CROP_SIZE[0] // 2)
-        bbox[2] -= (x - CROP_SIZE[0] // 2)
-        bbox[3] -= (y - CROP_SIZE[0] // 2)
-        return (x, y, bbox)
+        center_x = int((bd.xmin + bd.xmax) / 2 * ORIGINAL_SIZE[0])
+        center_y = int((bd.ymin + bd.ymax) / 2 * ORIGINAL_SIZE[1])
+        bbox = frameNorm(ORIGINAL_SIZE[0], ORIGINAL_SIZE[1], (bd.xmin, bd.ymin, bd.xmax, bd.ymax))
+        return (center_x, center_y, bbox)
     return None
 
 # cam control
@@ -160,17 +159,18 @@ CROP_SIZE = {CROP_SIZE} # crop
 
 cfg = ImageManipConfig()
 size = Size2f(CROP_SIZE[0], CROP_SIZE[1])
-rect = None
+# initial crop to center
+rect = RotatedRect()
+rect.size = size
+rect.center = Point2f(ORIGINAL_SIZE[0]//2, ORIGINAL_SIZE[1]//2)
 
 while True:
     dets = node.io['dets'].get().detections
     if len(dets) == 0:
-        if rect is None:
-            continue
-        else:
-            # use old rect
-            cfg.setCropRotatedRect(rect, False)
-            node.io['cfg'].send(cfg)
+        # use old rect
+        cfg.setCropRotatedRect(rect, False)
+        node.io['cfg'].send(cfg)
+        continue
     
     # find detection with most confidence
     best_detection = None
@@ -183,8 +183,6 @@ while True:
         x = int((coords.xmin + coords.xmax) / 2 * ORIGINAL_SIZE[0])
         y = int((coords.ymin + coords.ymax) / 2 * ORIGINAL_SIZE[1])
 
-        if rect is None:
-            rect = RotatedRect()
         rect.size = size
         rect.center = Point2f(x, y)
         cfg.setCropRotatedRect(rect, False)
@@ -192,7 +190,7 @@ while True:
 """)
 crop_manip = pipeline.create(dai.node.ImageManip)
 crop_manip.setMaxOutputFrameSize(CROP_SIZE[0] * CROP_SIZE[1] * 3)
-crop_manip.initialConfig.setResize(CROP_SIZE[0], CROP_SIZE[1])
+crop_manip.setWaitForConfigInput(True)
 
 script.outputs['cfg'].link(crop_manip.inputConfig)
 cam.video.link(crop_manip.inputImage)
@@ -211,7 +209,7 @@ def clamp(num, v0, v1):
     return max(v0, min(num, v1))
 def displayFrame(name, frame, dets = []):
     if len(dets):
-        detection_center_x, detection_center_y, bbox = get_bbox_on_crop(dets)
+        detection_center_x, detection_center_y, bbox = get_bbox_on_original_imgs(dets)
         crop_tl_x = detection_center_x - CROP_SIZE[0] // 2
         crop_tl_y = detection_center_y - CROP_SIZE[1] // 2
         # print(crop_tl_x, crop_tl_y)
@@ -239,7 +237,11 @@ def calcFps(name):
         
 
 cv2.namedWindow('nnin', cv2.WINDOW_NORMAL)
-cv2.resizeWindow('out', 888, 500)
+cv2.resizeWindow('nnin', 888, 500)
+
+cv2.namedWindow('paint', cv2.WINDOW_NORMAL | cv2.WINDOW_KEEPRATIO)
+cv_paint_img = np.zeros(shape=(ORIGINAL_SIZE[1],ORIGINAL_SIZE[0],3), dtype=np.uint8)
+cv2.resizeWindow('paint', 1280, 724)
 
 with dai.Device(pipeline) as device:
     sync = HostSync()
@@ -252,8 +254,6 @@ with dai.Device(pipeline) as device:
     ISO_STEP = 50
     expTime = 6000
     sensIso = 1500  
-    
-    wait_for_config_set = False
     
     # Main loop
     while True:
@@ -274,9 +274,6 @@ with dai.Device(pipeline) as device:
         if qDet.has():
             detIn = qDet.get()
             sync.add_det(detIn)
-            if not wait_for_config_set:
-                wait_for_config_set = True
-                crop_manip.setWaitForConfigInput(True)
 
         # get synchronized msgs
         det_msg, crop_msg = sync.get_msgs()
@@ -284,6 +281,14 @@ with dai.Device(pipeline) as device:
             crop_frame = crop_msg.getCvFrame()
             #displayFrame('crop', crop_frame, det_msg.detections if det_msg else None)
             displayFrame('crop', crop_frame)
+
+            # test bbox-image synch with inpaint
+            if len(det_msg.detections):
+                detection_center_x, detection_center_y, bbox = get_bbox_on_original_imgs(det_msg.detections)
+                crop_tl_x = detection_center_x - CROP_SIZE[0] // 2
+                crop_tl_y = detection_center_y - CROP_SIZE[1] // 2
+                cv_paint_img[crop_tl_y:crop_tl_y+crop_frame.shape[0], crop_tl_x:crop_tl_x+crop_frame.shape[1]] = crop_frame
+                cv2.imshow('paint', cv_paint_img)
 
         # Update screen (1ms pooling rate)
         key = cv2.waitKey(1)
