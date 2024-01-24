@@ -202,7 +202,7 @@ def resize_transform_obj(img, mask, longest_min, longest_max, transforms=False):
     return img_t, mask_t
 
 transforms_bg_obj = A.Compose([
-    A.RandomRotate90(p=1),
+    A.SafeRotate(p=0.4),
     A.ColorJitter(brightness=0.3,
                   contrast=0.3,
                   saturation=0.3,

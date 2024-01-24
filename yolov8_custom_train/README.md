@@ -47,7 +47,7 @@ $ yolo train model=yolov8s.pt data=./src/data/dataset/yolo_marker.yaml epochs=50
 $ yolo train model=yolov8n.pt data=./src/data/dataset/yolo_marker.yaml epochs=500 imgsz=[640,360] batch=64 device=0
 $ yolo train model=yolov8n.pt data=./src/data/dataset/yolo_marker.yaml epochs=1000 imgsz=320 batch=640 device=0
 $ yolo train model=yolov8n.pt data=./src/data/dataset/yolo_marker.yaml epochs=1000 imgsz=480 batch=256 device=0
-
+$ yolo train model=yolov8n.pt data=./dataset/yolo_marker.yaml epochs=1000 imgsz=640 batch=64 device=0
 ```
 
 ## test infer
