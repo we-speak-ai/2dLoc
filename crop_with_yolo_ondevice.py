@@ -11,7 +11,54 @@ import os
 import json
 import numpy as np
 from collections import deque
+from threading import Thread, Lock
 
+
+class HostSync:
+    def __init__(self):
+        self.lock = Lock()
+        self.msgs = {
+            'det': deque(),
+            'crop': deque(),
+            'preview': deque()
+        }
+
+    def add_det(self, msg):
+        with self.lock:
+            self.msgs['det'].append(msg)
+    def add_crop(self, msg):
+        with self.lock:
+            self.msgs['crop'].append(msg)
+    def add_preview(self, msg):
+        with self.lock:
+            self.msgs['preview'].append(msg)
+
+    def get_msgs(self):
+        if not self.msgs['det'] or not self.msgs['crop'] or not self.msgs['preview']:
+            # empty
+            return None, None, None
+        # get seq num of msgs
+        with self.lock:
+            seq_det = self.msgs['det'][0].getSequenceNum()
+            seq_crop = self.msgs['crop'][0].getSequenceNum()
+            seq_preview = self.msgs['preview'][0].getSequenceNum()
+            if seq_det == seq_crop == seq_preview:
+                # sync
+                return self.msgs['det'].popleft(), self.msgs['crop'].popleft(), self.msgs['preview'].popleft()
+        
+        # max size check
+        seq_diff = abs(seq_det, seq_crop)
+        seq_diff = min(seq_diff, abs(seq_det, seq_preview))
+        seq_diff = min(seq_diff, abs(seq_crop, seq_preview))
+        if seq_diff > 10:
+            # ??
+            print('sync buffer overflow')
+            with self.lock:
+                self.msgs['det'].clear()
+                self.msgs['crop'].clear()
+                self.msgs['preview'].clear()
+            return None, None, None
+'''
 
 class HostSync:
     def __init__(self):
@@ -38,6 +85,7 @@ class HostSync:
         if seq_det + 5 < seq_crop or seq_det > seq_crop:
             # no detection
             return None, self.msgs['crop'].popleft()
+'''
 
 THIS_PATH = os.path.dirname(os.path.abspath(__file__))
 # Start defining a pipeline
@@ -271,6 +319,7 @@ with dai.Device(pipeline) as device:
     sensIso = 1500  
     
     # Main loop
+    detections = None
     while True:
         if qCrop.has():
             crop_elem = qCrop.get()
@@ -281,10 +330,7 @@ with dai.Device(pipeline) as device:
 
         if qNNin.has():
             NNin_elem = qNNin.get()
-            # print('nnin: ', NNin_elem.getSequenceNum())
-            NNin_frame = NNin_elem.getCvFrame()
-            calcFps('nnin')
-            displayFrame('nnin', NNin_frame)
+            sync.add_preview(NNin_elem)
 
         if qDet.has():
             detIn = qDet.get()
@@ -297,7 +343,7 @@ with dai.Device(pipeline) as device:
             print(f"4k image saved to {fname}")
         
         # get synchronized msgs
-        det_msg, crop_msg = sync.get_msgs()
+        det_msg, crop_msg, preview_msg = sync.get_msgs()
         if crop_msg is not None:
             crop_frame = crop_msg.getCvFrame()
             #displayFrame('crop', crop_frame, det_msg.detections if det_msg else None)
@@ -305,7 +351,10 @@ with dai.Device(pipeline) as device:
 
             # test bbox-image synch with inpaint
             if len(det_msg.detections):
-                detection_center_x, detection_center_y, bbox = get_bbox_on_original_imgs(det_msg.detections)
+                detections = det_msg.detections
+
+            if detections is not None:
+                detection_center_x, detection_center_y, bbox = get_bbox_on_original_imgs(detections)
                 crop_tl_x = detection_center_x - CROP_SIZE[0] // 2
                 crop_tl_y = detection_center_y - CROP_SIZE[1] // 2
                 crop_br_x = crop_tl_x+crop_frame.shape[1]
@@ -313,6 +362,15 @@ with dai.Device(pipeline) as device:
                 if crop_tl_y > 0 and crop_tl_x > 0 and crop_br_x<ORIGINAL_SIZE[0] and crop_br_y<ORIGINAL_SIZE[1]:
                     cv_paint_img[crop_tl_y:crop_br_y, crop_tl_x:crop_br_x] = crop_frame
                     cv2.imshow('paint', cv_paint_img)
+                
+                NNin_frame = preview_msg.getCvFrame()
+                new_dim = (ORIGINAL_SIZE[0], ORIGINAL_SIZE[1])
+                # print(prev_dim, new_dim, prev_dim[0]/new_dim[0], prev_dim[1]/new_dim[1])
+                NNin_frame = cv2.resize(NNin_frame, new_dim, interpolation = cv2.INTER_AREA)
+                if crop_tl_y > 0 and crop_tl_x > 0 and crop_br_x<ORIGINAL_SIZE[0] and crop_br_y<ORIGINAL_SIZE[1]:
+                    NNin_frame[crop_tl_y:crop_br_y, crop_tl_x:crop_br_x] = crop_frame
+                    calcFps('nnin')
+                    displayFrame('nnin', NNin_frame)
 
         # Update screen (1ms pooling rate)
         key = cv2.waitKey(1)
