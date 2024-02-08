@@ -25,7 +25,7 @@ import numpy as np
 import albumentations as A
 import time
 from tqdm import tqdm
-
+from multiprocessing import Pool, cpu_count
 
 # # 2. Paths to files
 
@@ -202,7 +202,7 @@ def resize_transform_obj(img, mask, longest_min, longest_max, transforms=False):
     return img_t, mask_t
 
 transforms_bg_obj = A.Compose([
-    A.RandomRotate90(p=1),
+    A.SafeRotate(p=0.4),
     A.ColorJitter(brightness=0.3,
                   contrast=0.3,
                   saturation=0.3,
@@ -613,13 +613,10 @@ for i in range(len(annotations_yolo)):
 
 # In[32]:
 
-
-def generate_dataset(imgs_number, folder, split='train'):
-    time_start = time.time()
-    os.makedirs(os.path.join(folder, split, 'labels'), exist_ok=True)
-    os.makedirs(os.path.join(folder, split, 'images'), exist_ok=True)
-    
-    for j in tqdm(range(imgs_number)):
+def worker(args):
+    j, folder, split = args  # Unpack the arguments
+    np.random.seed(int(time.time()) + os.getpid() + j)
+    try:
         img_comp_bg = create_bg_with_noise(files_bg_imgs,
                                            files_bg_noise_imgs,
                                            files_bg_noise_masks,
@@ -633,13 +630,32 @@ def generate_dataset(imgs_number, folder, split='train'):
         img_comp = cv2.cvtColor(img_comp, cv2.COLOR_RGB2BGR)
         cv2.imwrite(os.path.join(folder, split, 'images/{}.jpg').format(j), img_comp)
 
-        try:
-            annotations_yolo = create_yolo_annotations(mask_comp, labels_comp)
-            for i in range(len(annotations_yolo)):
-                with open(os.path.join(folder, split, 'labels/{}.txt').format(j), "a") as f:
-                    f.write(' '.join(str(el) for el in annotations_yolo[i]) + '\n')
-        except:
-            continue
+        annotations_yolo = create_yolo_annotations(mask_comp, labels_comp)
+        for i in range(len(annotations_yolo)):
+            with open(os.path.join(folder, split, 'labels/{}.txt').format(j), "a") as f:
+                f.write(' '.join(str(el) for el in annotations_yolo[i]) + '\n')
+    except Exception as e:
+        print(f"Error processing image {j}: {e}")
+
+        
+def generate_dataset(imgs_number, folder, split='train'):
+    time_start = time.time()
+    os.makedirs(os.path.join(folder, split, 'labels'), exist_ok=True)
+    os.makedirs(os.path.join(folder, split, 'images'), exist_ok=True)
+    
+    pool = Pool(processes=cpu_count())
+
+    if False:
+        for j in tqdm(range(imgs_number)):
+            worker((j, folder, split))
+    else:
+        args = [(j, folder, split) for j in range(imgs_number)]  # Prepare arguments for each worker call
+        for _ in tqdm(pool.imap_unordered(worker, args), total=imgs_number):
+            pass
+
+    pool.close()
+    pool.join()
+
                 
     time_end = time.time()
     time_total = round(time_end - time_start)
@@ -653,6 +669,6 @@ def generate_dataset(imgs_number, folder, split='train'):
 # In[33]:
 
 
-generate_dataset(10000, folder='dataset', split='train')
-generate_dataset(1000, folder='dataset', split='valid')
+generate_dataset(30000, folder='dataset', split='train')
+generate_dataset(3000, folder='dataset', split='valid')
 
