@@ -12,7 +12,6 @@ import json
 import numpy as np
 from collections import deque
 from threading import Thread, Lock
-import marshal
 
 
 class HostSync:
@@ -85,7 +84,8 @@ cam.setFps(28.86)   # warning with 30..
 # 10k image train nn input
 #blob_path = f'{THIS_PATH}/yolov8_custom_train/20240119_train_yolov8n_10kimg_480x/blob_320x192/'
 #blob_path = f'{THIS_PATH}/yolov8_custom_train/20240119_train_yolov8n_10kimg_480x/blob_384x224/'
-blob_path = f'{THIS_PATH}/yolov8_custom_train/20240119_train_yolov8n_10kimg_480x/blob_480x256/'
+#blob_path = f'{THIS_PATH}/yolov8_custom_train/20240119_train_yolov8n_10kimg_480x/blob_480x256/'
+blob_path = f'{THIS_PATH}/yolov8_custom_train/20240208_train_yolov8n_30kimg_640x/blob_640x352/'
 model_path = f'{blob_path}/best_openvino_2022.1_5shave.blob'
 config_path = f'{blob_path}/best.json'
 
@@ -190,8 +190,6 @@ detectionNetwork.out.link(script.inputs['dets'])
 detectionNetwork.out.link(xoutDet.input)
 
 script.setScript(f"""
-import marshal
-
 ORIGINAL_SIZE = {ORIGINAL_SIZE} # 4K
 CROP_SIZE = {CROP_SIZE} # crop
 
@@ -205,7 +203,6 @@ rect.center = Point2f(ORIGINAL_SIZE[0]//2, ORIGINAL_SIZE[1]//2)
 while True:
     det_msg = node.io['dets'].get()
     dets = det_msg.detections
-    det_seq = det_msg.getSequenceNum()
     if len(dets) == 0:
         # use old rect
         cfg.setCropRotatedRect(rect, False)
@@ -226,13 +223,6 @@ while True:
         rect.size = size
         rect.center = Point2f(x, y)
 
-    x = """+'''{'center_x': rect.center.x,
-                'center_y': rect.center.y}'''+f"""
-    x_serial = marshal.dumps(x)
-    b = Buffer(len(x_serial))
-    b.setData(x_serial)
-    b.setSequenceNum(det_seq)
-    node.io['center'].send(b)
     cfg.setCropRotatedRect(rect, False)
     node.io['cfg'].send(cfg)
 """)
@@ -240,11 +230,6 @@ crop_manip = pipeline.create(dai.node.ImageManip)
 crop_manip.setMaxOutputFrameSize(CROP_SIZE[0] * CROP_SIZE[1] * 3)
 script.outputs['cfg'].link(crop_manip.inputConfig)
 crop_manip.setWaitForConfigInput(True)
-
-
-xout = pipeline.create(dai.node.XLinkOut)
-xout.setStreamName('script_center')
-script.outputs['center'].link(xout.input)
 
 cam.video.link(crop_manip.inputImage)
 
@@ -263,13 +248,27 @@ xoutStill.setStreamName("still")
 cam.setStillSize(ORIGINAL_SIZE[0], ORIGINAL_SIZE[1])
 cam.still.link(xoutStill.input)
 
-fpss = {}
-
 def clamp(num, v0, v1):
     return max(v0, min(num, v1))
 
-sync = HostSync()
 
+fpss = {}
+def calcFps(name):
+    if name not in fpss:
+        fpss[name] = {
+            'fps': 0,
+            'counter': 0,
+            'startTime': time.monotonic()
+        }
+    fpss[name]['counter']+=1
+    current_time = time.monotonic()
+    if (current_time - fpss[name]['startTime']) > 1 :
+        fpss[name]['fps'] = fpss[name]['counter'] / (current_time - fpss[name]['startTime'])
+        fpss[name]['counter'] = 0
+        fpss[name]['startTime'] = current_time
+    
+# msg sync module
+sync = HostSync()
 def camera_handler():
     with dai.Device(pipeline) as device:
 
@@ -278,26 +277,29 @@ def camera_handler():
         qDet = device.getOutputQueue(name="det")
         qControl = device.getInputQueue('control')
         qStill = device.getOutputQueue(name="still", maxSize=30, blocking=True)
-        qScriptCenter = device.getOutputQueue(name='script_center')
         
         # Make sure the destination path is present before starting to store the examples
         dirName = "rgb_data"
         Path(dirName).mkdir(parents=True, exist_ok=True)
         
-        EXP_STEP = 500  # us
-        ISO_STEP = 50
-        expTime = 6000
-        sensIso = 1500  
+        # set exposition time and iso
+        ctrl = dai.CameraControl()
+        expTime = 900   # 1 .. 33000
+        sensIso = 1600  # 100 .. 1600
+        ctrl.setManualExposure(expTime, sensIso)
+        qControl.send(ctrl)
         
         # Main loop
         while True:
             if qCrop.has():
                 crop_elem = qCrop.get()
                 sync.add_crop(crop_elem)
+                calcFps('crop')
 
             if qNNin.has():
                 NNin_elem = qNNin.get()
                 sync.add_preview(NNin_elem)
+                calcFps('nnin')
 
             if qDet.has():
                 detIn = qDet.get()
@@ -308,34 +310,7 @@ def camera_handler():
                 still_data = qStill.get().getData()
                 cv2.imwrite(fname, still_data.base.getCvFrame())
                 print(f"4k image saved to {fname}")
-
-            if qScriptCenter.has():
-                script_msg = qScriptCenter.get()
-                script_data = script_msg.getData()
-                print(script_msg.getSequenceNum(), marshal.loads(script_data))
         
-            '''
-            # Update screen (1ms pooling rate)
-            key = cv2.waitKey(1)
-            if key == ord('q'):
-                break
-            elif key == ord('c'):
-                ctrl = dai.CameraControl()
-                ctrl.setCaptureStill(True)
-                qControl.send(ctrl)
-                print("Sent 'still' event to the camera!")
-            elif key in [ord('i'), ord('o'), ord('k'), ord('l')]:
-                if key == ord('i'): expTime -= EXP_STEP
-                if key == ord('o'): expTime += EXP_STEP
-                if key == ord('k'): sensIso -= ISO_STEP
-                if key == ord('l'): sensIso += ISO_STEP
-                expTime = clamp(expTime, 1, 33000)
-                sensIso = clamp(sensIso, 100, 1600)
-                print("Setting manual exposure, time: ", expTime, "iso: ", sensIso)
-                ctrl = dai.CameraControl()
-                ctrl.setManualExposure(expTime, sensIso)
-                qControl.send(ctrl)
-            '''
 t1 = Thread(target=camera_handler)
 t1.start()
 
@@ -359,24 +334,9 @@ def displayFrame(name, frame, dets = []):
     # Show the frame
     cv2.imshow(name, frame)
 
-def calcFps(name):
-    if name not in fpss:
-        fpss[name] = {
-            'fps': 0,
-            'counter': 0,
-            'startTime': time.monotonic()
-        }
-    fpss[name]['counter']+=1
-    current_time = time.monotonic()
-    if (current_time - fpss[name]['startTime']) > 1 :
-        fpss[name]['fps'] = fpss[name]['counter'] / (current_time - fpss[name]['startTime'])
-        fpss[name]['counter'] = 0
-        fpss[name]['startTime'] = current_time
-    
-
 while True:
     # get synchronized msgs
-    cv2.waitKey(100)
+    cv2.waitKey(1)
     det_msg, crop_msg, preview_msg = sync.get_msgs()
     
     if crop_msg is not None:
@@ -394,16 +354,13 @@ while True:
             crop_tl_y = detection_center_y - CROP_SIZE[1] // 2
             crop_br_x = crop_tl_x+crop_frame.shape[1]
             crop_br_y = crop_tl_y+crop_frame.shape[0]
-            print(det_msg.getSequenceNum(), 'imgth', detection_center_x, detection_center_y)
             
-            NNin_frame = preview_msg.getCvFrame()
+            preview_frame = preview_msg.getCvFrame()
             new_dim = (ORIGINAL_SIZE[0], ORIGINAL_SIZE[1])
             # print(prev_dim, new_dim, prev_dim[0]/new_dim[0], prev_dim[1]/new_dim[1])
-            NNin_frame = cv2.resize(NNin_frame, new_dim, interpolation = cv2.INTER_AREA)
+            preview_frame = cv2.resize(preview_frame, new_dim, interpolation = cv2.INTER_AREA)
             if crop_tl_y > 0 and crop_tl_x > 0 and crop_br_x<ORIGINAL_SIZE[0] and crop_br_y<ORIGINAL_SIZE[1]:
-                NNin_frame[crop_tl_y:crop_br_y, crop_tl_x:crop_br_x] = crop_frame
-                calcFps('nnin')
-                displayFrame('nnin', NNin_frame)
-
+                preview_frame[crop_tl_y:crop_br_y, crop_tl_x:crop_br_x] = crop_frame
+                displayFrame('nnin', preview_frame)
 
 t1.join()
